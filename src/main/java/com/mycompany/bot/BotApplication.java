@@ -41,7 +41,7 @@ public class BotApplication {
 
     // Register a "formReply" activity that handles the Gif category form submission
     bdk.activities().register(new GifFormActivity(bdk.messages()));
-    bdk.activities().register(new UserCreationFormActivityAPI(bdk.messages(), botSession, "https://develop2.symphony.com"));
+    bdk.activities().register(new UserCreationFormActivityAPI(bdk.messages(), bdk.users(), botSession));
 
     // Subscribe to 'onUserJoinedRoom' Real Time Event
     bdk.datafeed().subscribe(new RealTimeEventListener() {
