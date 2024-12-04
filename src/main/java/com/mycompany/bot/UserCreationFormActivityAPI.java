@@ -1,10 +1,5 @@
 package com.mycompany.bot;
 
-import java.io.IOException;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.security.spec.InvalidKeySpecException;
@@ -16,8 +11,6 @@ import javax.crypto.spec.PBEKeySpec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.symphony.bdk.core.activity.ActivityMatcher;
 import com.symphony.bdk.core.activity.form.FormReplyActivity;
 import com.symphony.bdk.core.activity.form.FormReplyContext;
@@ -26,7 +19,11 @@ import com.symphony.bdk.core.activity.model.ActivityType;
 import com.symphony.bdk.core.auth.AuthSession;
 import com.symphony.bdk.core.service.message.MessageService;
 import com.symphony.bdk.core.service.message.model.Message;
-
+import com.symphony.bdk.core.service.user.UserService;
+import com.symphony.bdk.gen.api.model.Password;
+import com.symphony.bdk.gen.api.model.V2UserAttributes;
+import com.symphony.bdk.gen.api.model.V2UserCreate;
+import com.symphony.bdk.gen.api.model.V2UserDetail;
 
 public class UserCreationFormActivityAPI extends FormReplyActivity<FormReplyContext> {
 
@@ -35,14 +32,14 @@ public class UserCreationFormActivityAPI extends FormReplyActivity<FormReplyCont
     return new ActivityInfo().type(ActivityType.FORM).name("User Creation Form Activity");
   }
   private final MessageService messageService;
-  private final String apiUrl;
+  private final UserService userService;
   private final AuthSession authSession;
 
   private static final Logger LOGGER = LoggerFactory.getLogger(UserCreationFormActivityAPI.class);
 
-  public UserCreationFormActivityAPI(MessageService messageService, AuthSession authSession, String apiUrl) {
+  public UserCreationFormActivityAPI(MessageService messageService, UserService userService, AuthSession authSession) {
     this.messageService = messageService;
-    this.apiUrl = apiUrl;
+    this.userService = userService;
     this.authSession = authSession;
   }
 
@@ -52,32 +49,28 @@ public class UserCreationFormActivityAPI extends FormReplyActivity<FormReplyCont
         && "submit".equals(context.getFormValue("action"));
   }
 
-@Override
-public void onActivity(FormReplyContext context) {
+  @Override
+  public void onActivity(FormReplyContext context) {
     final String firstName = context.getFormValue("firstName");
     final String lastName = context.getFormValue("lastName");
     final String email = context.getFormValue("email");
     final String password = context.getFormValue("password");
 
-    final String message = "<messageML>User details are '" + firstName + " " + lastName + " " + email + " " + password + "'</messageML>";
+    final String message = "<messageML>User details are '" + firstName + " " + lastName + " " + email + "'</messageML>";
     this.messageService.send(context.getSourceEvent().getStream(), Message.builder().content(message).build());
 
     try {
-        // Retrieve the session token
-        String sessionToken = authSession.getSessionToken();
-
         // Create user creation payload
-        ObjectMapper mapper = new ObjectMapper();
-        ObjectNode userAttributes = mapper.createObjectNode();
-        userAttributes.put("accountType", "NORMAL");
-        userAttributes.put("firstName", firstName);
-        userAttributes.put("lastName", lastName);
-        userAttributes.put("displayName", firstName + " " + lastName);
-        userAttributes.put("emailAddress", email);
-        userAttributes.put("userName", email);
+        V2UserCreate v2UserCreate = new V2UserCreate();
+        V2UserAttributes userAttributes = new V2UserAttributes();
+        userAttributes.setAccountType(V2UserAttributes.AccountTypeEnum.NORMAL);
+        userAttributes.setFirstName(firstName);
+        userAttributes.setLastName(lastName);
+        userAttributes.setDisplayName(firstName + " " + lastName);
+        userAttributes.setEmailAddress(email);
+        userAttributes.setUserName(email);
 
-        ObjectNode userCreatePayload = mapper.createObjectNode();
-        userCreatePayload.set("userAttributes", userAttributes);
+        v2UserCreate.setUserAttributes(userAttributes);
 
         // Hash the password if provided
         if (password != null && !password.isEmpty()) {
@@ -88,51 +81,34 @@ public void onActivity(FormReplyContext context) {
             byte[] hashedPasswordBytes = generateStrongPasswordHash(password, saltBytes);
             String hashedPassword = Base64.getEncoder().encodeToString(hashedPasswordBytes);
 
-            ObjectNode passwordNode = mapper.createObjectNode();
-            passwordNode.put("hSalt", salt);
-            passwordNode.put("hPassword", hashedPassword);
-            passwordNode.put("khSalt", salt);
-            passwordNode.put("khPassword", hashedPassword);
+            Password passwordObject = new Password();
+            passwordObject.sethSalt(salt);
+            passwordObject.sethPassword(hashedPassword);
+            passwordObject.setKhSalt(salt);
+            passwordObject.setKhPassword(hashedPassword);
 
-            userCreatePayload.set("password", passwordNode);
+            v2UserCreate.setPassword(passwordObject);
         }
 
-        // Build the HTTP request
-        LOGGER.info("Creating user with payload: " + userCreatePayload.toString());
-        HttpClient client = HttpClient.newHttpClient();
-        HttpRequest request = HttpRequest.newBuilder()
-            .uri(URI.create(apiUrl + "/pod/v2/admin/user/create"))
-            .header("sessionToken", sessionToken)
-            .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(userCreatePayload)))
-            .build();
+        // Create the user
+        V2UserDetail userDetail = userService.create(v2UserCreate);
 
-        // Send the request and handle the response
-        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        String userCreatedMessage = "<messageML>User created: " + userDetail.getUserSystemInfo().getId() + "</messageML>";
+        this.messageService.send(context.getSourceEvent().getStream(), Message.builder().content(userCreatedMessage).build());
 
-        if (response.statusCode() == 200) {
-            // Parse the response to get user details
-            ObjectNode responseBody = (ObjectNode) mapper.readTree(response.body());
-            String userId = responseBody.path("userSystemInfo").path("id").asText();
-            String userCreatedMessage = "<messageML>User created: " + userId + "</messageML>";
-            this.messageService.send(context.getSourceEvent().getStream(), Message.builder().content(userCreatedMessage).build());
-        } else {
-            String errorMessage = "<messageML>Failed to create user. API response: " + response.body() + "</messageML>";
-            this.messageService.send(context.getSourceEvent().getStream(), Message.builder().content(errorMessage).build());
-        }
-    } catch (IOException | InterruptedException | NoSuchAlgorithmException | InvalidKeySpecException e) {
+    } catch (NoSuchAlgorithmException | InvalidKeySpecException e) {
         String errorMessage = "<messageML>Exception occurred: " + e.getMessage() + "</messageML>";
         this.messageService.send(context.getSourceEvent().getStream(), Message.builder().content(errorMessage).build());
     }
-}
+  }
 
-private static byte[] generateStrongPasswordHash(String password, byte[] salt)
-    throws NoSuchAlgorithmException, InvalidKeySpecException {
+  private static byte[] generateStrongPasswordHash(String password, byte[] salt)
+      throws NoSuchAlgorithmException, InvalidKeySpecException {
     int iterations = 10000;
     char[] pb = password.toCharArray();
     PBEKeySpec spec = new PBEKeySpec(pb, salt, iterations, 256);
     SecretKeyFactory skf = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
     byte[] hash = skf.generateSecret(spec).getEncoded();
     return hash;
-}
+  }
 }
